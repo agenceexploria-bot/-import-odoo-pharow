@@ -129,7 +129,7 @@ function fuzzyScore(a: string, b: string): number {
   const wordsA = new Set(normalize(a).split(" "));
   const wordsB = new Set(normalize(b).split(" "));
   let matches = 0;
-  for (const w of wordsA) {
+  for (const w of Array.from(wordsA)) {
     if (w.length > 2 && wordsB.has(w)) matches++;
   }
   return matches / Math.max(wordsA.size, wordsB.size, 1);

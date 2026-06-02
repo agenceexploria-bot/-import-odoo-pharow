@@ -47,7 +47,7 @@ export function parsePharowCSV(text: string): PharowRow[] {
   const result = Papa.parse<PharowRow>(csvText, {
     header: true,
     skipEmptyLines: true,
-    trimHeaders: true,
+    transformHeader: (h: string) => h.trim(),
   });
 
   return result.data;
