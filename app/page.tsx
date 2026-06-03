@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useRef, useState, useCallback } from "react";
+import { Fragment, useRef, useState, useCallback, useEffect } from "react";
 import { parsePharowCSV, PharowRow } from "@/lib/csvParser";
 import { resolveSiret, clearSiretCache } from "@/lib/siretClient";
 import { transformRow, toCsvString, OdooRow } from "@/lib/transform";
@@ -149,7 +149,6 @@ function Dashboard({ history, onNew }: { history: ConversionRecord[]; onNew: () 
   const totalContacts = history.reduce((s, r) => s + r.contacts, 0);
   const totalSiret = history.reduce((s, r) => s + r.siretToConfirm, 0);
   const totalNoEmail = history.reduce((s, r) => s + r.noEmail, 0);
-  const recent = history.slice(-5).reverse();
 
   return (
     <div className="view">
@@ -204,36 +203,6 @@ function Dashboard({ history, onNew }: { history: ConversionRecord[]; onNew: () 
         </div>
       </div>
 
-      <div className="card card-pad">
-        <div className="sec-head">
-          <div className="sec-title">
-            Conversions récentes
-            <span className="muted">{history.length} au total</span>
-          </div>
-        </div>
-        {recent.length === 0 ? (
-          <div className="empty-state">
-            <Icon name="clock" size={32} />
-            <p>Aucune conversion encore — lancez-en une !</p>
-          </div>
-        ) : (
-          <div className="feed">
-            {recent.map(c => (
-              <div className="feed-item" key={c.id}>
-                <div className={`feed-ico ${c.status}`}>
-                  <Icon name={c.status === "success" ? "fileCheck" : c.status === "partial" ? "alert" : "x"} size={15} stroke={2.2} />
-                </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div className="feed-title">{c.file}</div>
-                  <div className="feed-detail">{c.contacts} contacts · {c.siretToConfirm} SIRET à confirmer · {c.noEmail} sans email</div>
-                  <div className="feed-meta"><b>{c.id}</b> · {c.date}</div>
-                </div>
-                <Badge status={c.status} />
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
     </div>
   );
 }
@@ -245,17 +214,41 @@ function ConvertWizard({ defaultLabel, onComplete }: {
   onComplete: (record: ConversionRecord) => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const completedRef = useRef(false);
+  const onCompleteRef = useRef(onComplete);
+  useEffect(() => { onCompleteRef.current = onComplete; });
+
   const [step, setStep] = useState(0);
   const [drag, setDrag] = useState(false);
   const [fileName, setFileName] = useState("");
   const [rows, setRows] = useState<PharowRow[]>([]);
   const [detectedCols, setDetectedCols] = useState<string[]>([]);
   const [localLabel, setLocalLabel] = useState(defaultLabel);
+  const [localSiret, setLocalSiret] = useState(true);
   const [progress, setProgress] = useState(0);
   const [progressLabel, setProgressLabel] = useState("");
   const [outputRows, setOutputRows] = useState<OdooRow[]>([]);
   const [stats, setStats] = useState({ total: 0, siretConfirmed: 0, siretToConfirm: 0, noEmail: 0 });
   const [csvData, setCsvData] = useState("");
+
+  // Fire onComplete AFTER step 3 is painted — no setTimeout needed
+  useEffect(() => {
+    if (step !== 3 || completedRef.current || !csvData) return;
+    completedRef.current = true;
+    const s = stats;
+    const status = s.noEmail === s.total && s.total > 0 ? "error" : s.siretToConfirm > 0 || s.noEmail > 0 ? "partial" : "success";
+    onCompleteRef.current({
+      id: `CV-${Date.now().toString().slice(-4)}`,
+      file: fileName,
+      date: new Date().toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }),
+      rows: rows.length,
+      contacts: s.total,
+      siretToConfirm: s.siretToConfirm,
+      noEmail: s.noEmail,
+      status,
+      csvData,
+    });
+  }, [step, csvData]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleFile = useCallback((file: File) => {
     const reader = new FileReader();
@@ -279,16 +272,20 @@ function ConvertWizard({ defaultLabel, onComplete }: {
     setStep(2); setProgress(0); setProgressLabel("");
     clearSiretCache();
     const result: OdooRow[] = [];
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      const nom = row["Nom"] ?? "";
-      const prenom = row["Prénom"] ?? "";
-      setProgressLabel(`${nom} ${prenom} (${i + 1}/${rows.length})`);
-      const siretResult = await resolveSiret(row, (msg) => {
-        setProgressLabel(`${nom} ${prenom} — ${msg}`);
-      });
-      result.push(transformRow(row, localLabel, siretResult));
-      setProgress(Math.round(((i + 1) / rows.length) * 100));
+    try {
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        const nom = row["Nom"] ?? "";
+        const prenom = row["Prénom"] ?? "";
+        setProgressLabel(`${nom} ${prenom} (${i + 1}/${rows.length})`);
+        const siretResult = localSiret
+          ? await resolveSiret(row, (msg) => setProgressLabel(`${nom} ${prenom} — ${msg}`))
+          : { siret: (row["SIRET du siège"] ?? "").trim(), confirmer: true, source: "fallback" as const };
+        result.push(transformRow(row, localLabel, siretResult));
+        setProgress(Math.round(((i + 1) / rows.length) * 100));
+      }
+    } catch (err) {
+      console.error("Conversion error:", err);
     }
     const csv = toCsvString(result);
     const s = {
@@ -301,22 +298,6 @@ function ConvertWizard({ defaultLabel, onComplete }: {
     setStats(s);
     setCsvData(csv);
     setStep(3);
-
-    // Delay so step 3 renders before parent state update triggers re-render
-    const status = s.noEmail === s.total ? "error" : s.siretToConfirm > 0 || s.noEmail > 0 ? "partial" : "success";
-    setTimeout(() => {
-      onComplete({
-        id: `CV-${Date.now().toString().slice(-4)}`,
-        file: fileName,
-        date: new Date().toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }),
-        rows: rows.length,
-        contacts: s.total,
-        siretToConfirm: s.siretToConfirm,
-        noEmail: s.noEmail,
-        status,
-        csvData: csv,
-      });
-    }, 100);
   };
 
   const downloadCsv = () => {
@@ -328,6 +309,7 @@ function ConvertWizard({ defaultLabel, onComplete }: {
   };
 
   const reset = () => {
+    completedRef.current = false;
     setStep(0); setFileName(""); setRows([]); setDetectedCols([]);
     setProgress(0); setProgressLabel(""); setOutputRows([]); setCsvData("");
     setStats({ total: 0, siretConfirmed: 0, siretToConfirm: 0, noEmail: 0 });
@@ -349,48 +331,88 @@ function ConvertWizard({ defaultLabel, onComplete }: {
 
       {/* Step 0 — Import */}
       {step === 0 && (
-        <div className="card card-pad">
-          {!fileName ? (
-            <div
-              className={`dropzone${drag ? " drag" : ""}`}
-              onDragOver={e => { e.preventDefault(); setDrag(true); }}
-              onDragLeave={() => setDrag(false)}
-              onDrop={onDrop}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <div className="dz-ico"><Icon name="uploadCloud" size={28} /></div>
-              <div className="dz-title">Déposez votre export Pharow / Kaspr ici</div>
-              <div className="dz-sub">ou cliquez pour parcourir · format CSV uniquement</div>
-              <div className="dz-formats">
-                <span className="fmt-tag">.csv</span>
-              </div>
-            </div>
-          ) : (
-            <div>
-              <div className="file-card">
-                <div className="file-ico"><Icon name="sheet" size={22} /></div>
-                <div style={{ flex: 1 }}>
-                  <div className="file-name">{fileName}</div>
-                  <div className="file-meta">{rows.length} contacts détectés · {detectedCols.length} colonnes</div>
+        <div>
+          <div className="card card-pad">
+            {!fileName ? (
+              <div
+                className={`dropzone${drag ? " drag" : ""}`}
+                onDragOver={e => { e.preventDefault(); setDrag(true); }}
+                onDragLeave={() => setDrag(false)}
+                onDrop={onDrop}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <div className="dz-ico"><Icon name="uploadCloud" size={28} /></div>
+                <div className="dz-title">Déposez votre export Pharow / Kaspr ici</div>
+                <div className="dz-sub">ou cliquez pour parcourir · format CSV uniquement</div>
+                <div className="dz-formats">
+                  <span className="fmt-tag">.csv</span>
                 </div>
-                <span className="badge st-success"><Icon name="check" size={12} stroke={2.6} />Lu avec succès</span>
               </div>
-              <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".6px", textTransform: "uppercase", color: "var(--ink-3)", margin: "18px 0 10px" }}>
-                Colonnes détectées
+            ) : (
+              <div>
+                <div className="file-card">
+                  <div className="file-ico"><Icon name="sheet" size={22} /></div>
+                  <div style={{ flex: 1 }}>
+                    <div className="file-name">{fileName}</div>
+                    <div className="file-meta">{rows.length} contacts détectés · {detectedCols.length} colonnes</div>
+                  </div>
+                  <span className="badge st-success"><Icon name="check" size={12} stroke={2.6} />Lu avec succès</span>
+                </div>
+                <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".6px", textTransform: "uppercase", color: "var(--ink-3)", margin: "18px 0 10px" }}>
+                  Colonnes détectées
+                </div>
+                <div className="col-chips">
+                  {detectedCols.map(c => <span className="col-chip" key={c}>{c}</span>)}
+                </div>
+                <div className="row" style={{ marginTop: 22, justifyContent: "flex-end", gap: 10 }}>
+                  <Btn variant="ghost" onClick={() => { setFileName(""); setRows([]); setDetectedCols([]); if (fileInputRef.current) fileInputRef.current.value = ""; }}>
+                    Changer de fichier
+                  </Btn>
+                  <Btn icon="arrowRight" onClick={() => setStep(1)}>Continuer vers le mapping</Btn>
+                </div>
               </div>
-              <div className="col-chips">
-                {detectedCols.map(c => <span className="col-chip" key={c}>{c}</span>)}
+            )}
+            <input ref={fileInputRef} type="file" accept=".csv" style={{ display: "none" }}
+              onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f); }} />
+          </div>
+
+          {/* Options de conversion */}
+          <div className="card" style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 0 }}>
+            <div className="card-pad" style={{ borderRight: "1px solid var(--line)" }}>
+              <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".6px", textTransform: "uppercase", color: "var(--ink-3)", marginBottom: 12 }}>
+                Prospecteur
               </div>
-              <div className="row" style={{ marginTop: 22, justifyContent: "flex-end", gap: 10 }}>
-                <Btn variant="ghost" onClick={() => { setFileName(""); setRows([]); setDetectedCols([]); if (fileInputRef.current) fileInputRef.current.value = ""; }}>
-                  Changer de fichier
-                </Btn>
-                <Btn icon="arrowRight" onClick={() => setStep(1)}>Continuer vers le mapping</Btn>
+              <div className="radio-group-v">
+                {LABELS.map(l => (
+                  <label key={l.value} className={`radio-label-v${localLabel === l.value ? " checked" : ""}`}>
+                    <input type="radio" name="wiz-label-0" value={l.value} checked={localLabel === l.value} onChange={() => setLocalLabel(l.value)} />
+                    {l.label}
+                  </label>
+                ))}
               </div>
             </div>
-          )}
-          <input ref={fileInputRef} type="file" accept=".csv" style={{ display: "none" }}
-            onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f); }} />
+            <div className="card-pad">
+              <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".6px", textTransform: "uppercase", color: "var(--ink-3)", marginBottom: 12 }}>
+                Règles de conversion
+              </div>
+              <div className="set-row">
+                <div>
+                  <div className="set-label">Résolution SIRET (API INSEE)</div>
+                  <div className="set-desc">Vérifie et complète le SIRET pour chaque entreprise</div>
+                </div>
+                <button className={`toggle${localSiret ? " on" : ""}`} onClick={() => setLocalSiret(v => !v)}>
+                  <span className="knob"></span>
+                </button>
+              </div>
+              <div className="set-row">
+                <div>
+                  <div className="set-label">Format sortie</div>
+                  <div className="set-desc">CSV · virgule · UTF-8 · compatible Odoo</div>
+                </div>
+                <span className="badge st-ok" style={{ flexShrink: 0 }}><Icon name="check" size={12} stroke={2.6} />CSV</span>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
@@ -418,20 +440,6 @@ function ConvertWizard({ defaultLabel, onComplete }: {
           <div style={{ fontSize: 12, color: "var(--ink-3)", marginBottom: 16, display: "flex", alignItems: "center", gap: 6 }}>
             <Icon name="info" size={14} style={{ flexShrink: 0 }} />
             Le mapping est fixe pour les exports Pharow/Kaspr. La résolution SIRET se fait via l&apos;API INSEE.
-          </div>
-              {/* Prospecteur selector */}
-          <div className="card card-pad" style={{ marginTop: 12 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".6px", textTransform: "uppercase", color: "var(--ink-3)", marginBottom: 12 }}>
-              Prospecteur (étiquette Odoo)
-            </div>
-            <div className="radio-group-v">
-              {LABELS.map(l => (
-                <label key={l.value} className={`radio-label-v${localLabel === l.value ? " checked" : ""}`}>
-                  <input type="radio" name="wiz-label" value={l.value} checked={localLabel === l.value} onChange={() => setLocalLabel(l.value)} />
-                  {l.label}
-                </label>
-              ))}
-            </div>
           </div>
 
           <div className="row" style={{ gap: 10, marginTop: 12 }}>
@@ -721,7 +729,7 @@ export default function Home() {
 
   const goNew = () => { setConvertKey(k => k + 1); setActive("convert"); };
   const navigate = (v: View) => { if (v === "convert") setConvertKey(k => k + 1); setActive(v); };
-  const addRecord = (r: ConversionRecord) => setHistory(h => [...h, r]);
+  const addRecord = useCallback((r: ConversionRecord) => setHistory(h => [...h, r]), []);
 
   const views: Record<View, React.ReactNode> = {
     home:     <Dashboard history={history} onNew={goNew} />,
