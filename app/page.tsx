@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useRef, useState, useCallback } from "react";
+import { Fragment, useRef, useState, useCallback, useEffect } from "react";
 import { parsePharowCSV, PharowRow } from "@/lib/csvParser";
 import { resolveSiret, clearSiretCache } from "@/lib/siretClient";
 import { transformRow, toCsvString, OdooRow } from "@/lib/transform";
@@ -60,6 +60,8 @@ const ICONS: Record<string, string> = {
   sheet:       '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/>',
   info:        '<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/>',
   userCheck:   '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="m16 11 2 2 4-4"/>',
+  sparkles:    '<path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/><path d="M5 3v4"/><path d="M19 17v4"/><path d="M3 5h4"/><path d="M17 19h4"/>',
+  send:        '<path d="M22 2 11 13"/><path d="M22 2 15 22 11 13 2 9l20-7Z"/>',
 };
 
 function Icon({ name, size = 20, stroke = 2, style }: {
@@ -527,6 +529,122 @@ function MappingView() {
   );
 }
 
+// ── ActIA chat widget ──────────────────────────────────────────────────────
+
+const ACTIA_SUGGESTIONS = [
+  "Quel est le SIRET de Michelin à Clermont-Ferrand ?",
+  "Comment fonctionne la résolution SIRET ?",
+  "Que signifie SIRET À CONFIRMER ?",
+  "Quels fichiers puis-je importer ?",
+];
+
+function ActIA() {
+  const [open, setOpen] = useState(false);
+  const [messages, setMessages] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
+  const [input, setInput] = useState("");
+  const [loading, setLoading] = useState(false);
+  const msgsEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    msgsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, loading]);
+
+  const send = useCallback(async (text?: string) => {
+    const content = (text ?? input).trim();
+    if (!content || loading) return;
+    const userMsg = { role: "user" as const, content };
+    const nextMessages = [...messages, userMsg];
+    setMessages(nextMessages);
+    setInput("");
+    setLoading(true);
+    try {
+      const res = await fetch("/api/actia", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: nextMessages }),
+      });
+      const data = await res.json();
+      setMessages(m => [...m, { role: "assistant", content: data.content }]);
+    } catch {
+      setMessages(m => [...m, { role: "assistant", content: "Erreur de connexion. Veuillez réessayer." }]);
+    } finally {
+      setLoading(false);
+    }
+  }, [messages, input, loading]);
+
+  return (
+    <>
+      {open && (
+        <div className="actia-panel">
+          {/* Header */}
+          <div className="actia-head">
+            <div className="actia-head-ico">
+              <Icon name="sparkles" size={19} stroke={1.8} />
+            </div>
+            <div>
+              <div className="actia-head-name">ActIA</div>
+              <div className="actia-head-sub">Assistant Acticonvert · Intelligence artificielle</div>
+            </div>
+            <button className="actia-close" onClick={() => setOpen(false)}>
+              <Icon name="x" size={18} />
+            </button>
+          </div>
+
+          {/* Messages */}
+          <div className="actia-msgs">
+            {messages.length === 0 ? (
+              <div className="actia-welcome">
+                <div className="actia-welcome-ico">
+                  <Icon name="sparkles" size={24} stroke={1.8} />
+                </div>
+                <strong>Bonjour, je suis ActIA</strong>
+                Je peux vous aider à utiliser Acticonvert et rechercher des SIRET / SIREN d'entreprises françaises.
+                <div className="actia-suggestions">
+                  {ACTIA_SUGGESTIONS.map(s => (
+                    <button key={s} className="actia-sugg" onClick={() => send(s)}>{s}</button>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              messages.map((m, i) => (
+                <div key={i} className={`actia-msg ${m.role}`}>{m.content}</div>
+              ))
+            )}
+            {loading && (
+              <div className="actia-typing">
+                <div className="actia-dot" />
+                <div className="actia-dot" />
+                <div className="actia-dot" />
+              </div>
+            )}
+            <div ref={msgsEndRef} />
+          </div>
+
+          {/* Input */}
+          <div className="actia-form">
+            <input
+              className="actia-input"
+              placeholder="Posez votre question…"
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+              disabled={loading}
+            />
+            <button className="actia-send" onClick={() => send()} disabled={!input.trim() || loading}>
+              <Icon name="send" size={16} stroke={2} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Floating button */}
+      <button className="actia-btn" onClick={() => setOpen(o => !o)} title="ActIA — Assistant IA">
+        <Icon name={open ? "x" : "sparkles"} size={22} stroke={open ? 2.5 : 1.8} />
+      </button>
+    </>
+  );
+}
+
 // ── Settings view ──────────────────────────────────────────────────────────
 
 function SettingsView({ label, setLabel }: { label: string; setLabel: (v: string) => void }) {
@@ -642,6 +760,9 @@ export default function Home() {
           {views[active]}
         </div>
       </main>
+
+      {/* ActIA — floating assistant */}
+      <ActIA />
     </div>
   );
 }

@@ -12,7 +12,7 @@ interface SiretRequest {
 interface SiretResponse {
   siret: string;
   confirmer: boolean;
-  source: "cache" | "api-gov" | "claude" | "fallback";
+  source: "cache" | "api-gov" | "pappers" | "claude" | "fallback";
 }
 
 // cache serveur par SIREN+ville (persiste entre requêtes dans le process)
@@ -86,6 +86,44 @@ async function searchApiGov(
   // préférer non-siège
   const nonSiege = candidats.find((e) => !e.etablissement_siege);
   return (nonSiege ?? candidats[0]).siret;
+}
+
+async function searchPappers(
+  siren: string,
+  ville: string,
+  codePostal?: string
+): Promise<string | null> {
+  const apiKey = process.env.PAPPERS_API_KEY;
+  if (!apiKey || !siren) return null;
+
+  const url = `https://api.pappers.fr/v2/entreprise?api_token=${apiKey}&siren=${siren}&etablissements_par_page=100`;
+  const res = await fetch(url, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) return null;
+
+  const data = await res.json();
+  const etabs: Array<{
+    siret: string;
+    siege?: boolean;
+    ferme?: boolean;
+    ville?: string;
+    code_postal?: string;
+  }> = data.etablissements ?? [];
+
+  const villeNorm = ville.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+
+  const candidats = etabs.filter((e) => {
+    if (e.ferme) return false;
+    const eVille = (e.ville ?? "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+    const cpMatch = codePostal ? e.code_postal === codePostal : true;
+    return eVille.includes(villeNorm) || villeNorm.includes(eVille) || cpMatch;
+  });
+
+  if (candidats.length === 0) return null;
+  const nonSiege = candidats.find((e) => !e.siege);
+  return (nonSiege ?? candidats[0]).siret ?? null;
 }
 
 async function searchClaude(
@@ -164,7 +202,22 @@ export async function POST(req: NextRequest) {
     if (process.env.NODE_ENV === "development") console.warn("[SIRET] API-GOV error:", e);
   }
 
-  // Étape 2 — Claude API + web_search
+  // Étape 2 — Pappers
+  try {
+    const siret = await searchPappers(siren, ville, codePostal);
+    if (siret) {
+      const result: SiretResponse = { siret, confirmer: false, source: "pappers" };
+      serverCache.set(cacheKey, result);
+      if (process.env.NODE_ENV === "development") {
+        console.log(`[SIRET] ${nomCommercial} / ${ville} → PAPPERS → ${siret}`);
+      }
+      return NextResponse.json(result);
+    }
+  } catch (e) {
+    if (process.env.NODE_ENV === "development") console.warn("[SIRET] Pappers error:", e);
+  }
+
+  // Étape 3 — Claude API + web_search
   try {
     const siret = await searchClaude(nomCommercial, siren, ville);
     if (siret) {
