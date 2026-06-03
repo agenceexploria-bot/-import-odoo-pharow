@@ -1,25 +1,13 @@
 "use client";
 
-import { Fragment, useRef, useState, useCallback, useEffect } from "react";
+import { Fragment, useRef, useState, useCallback } from "react";
 import { parsePharowCSV, PharowRow } from "@/lib/csvParser";
 import { resolveSiret, clearSiretCache } from "@/lib/siretClient";
 import { transformRow, toCsvString, OdooRow } from "@/lib/transform";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-type View = "home" | "convert" | "mapping" | "history" | "settings";
-
-interface ConversionRecord {
-  id: string;
-  file: string;
-  date: string;
-  rows: number;
-  contacts: number;
-  siretToConfirm: number;
-  noEmail: number;
-  status: "success" | "partial" | "error";
-  csvData: string;
-}
+type View = "home" | "convert" | "mapping" | "settings";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -46,7 +34,6 @@ const NAV: { id: View; label: string; icon: string }[] = [
   { id: "home",     label: "Accueil",            icon: "grid"    },
   { id: "convert",  label: "Nouvelle conversion", icon: "convert" },
   { id: "mapping",  label: "Modèle de mapping",   icon: "map"     },
-  { id: "history",  label: "Historique",           icon: "clock"   },
   { id: "settings", label: "Paramètres",           icon: "gear"    },
 ];
 
@@ -145,11 +132,7 @@ function Stepper({ step }: { step: number }) {
 
 // ── Dashboard ──────────────────────────────────────────────────────────────
 
-function Dashboard({ history, onNew }: { history: ConversionRecord[]; onNew: () => void }) {
-  const totalContacts = history.reduce((s, r) => s + r.contacts, 0);
-  const totalSiret = history.reduce((s, r) => s + r.siretToConfirm, 0);
-  const totalNoEmail = history.reduce((s, r) => s + r.noEmail, 0);
-
+function Dashboard({ onNew }: { onNew: () => void }) {
   return (
     <div className="view">
       <div className="page-head">
@@ -168,55 +151,35 @@ function Dashboard({ history, onNew }: { history: ConversionRecord[]; onNew: () 
         <Btn icon="upload" onClick={onNew}>Nouvelle conversion</Btn>
       </div>
 
-      <div className="kpi-grid">
-        <div className="card card-pad kpi">
-          <div className="kpi-top">
-            <div className="kpi-ico"><Icon name="sheet" size={20} /></div>
-          </div>
-          <div className="kpi-val">{history.length}</div>
-          <div className="kpi-label">Fichiers convertis</div>
-          <div className="kpi-sub">depuis le début</div>
-        </div>
-        <div className="card card-pad kpi">
-          <div className="kpi-top">
-            <div className="kpi-ico"><Icon name="userCheck" size={20} /></div>
-          </div>
-          <div className="kpi-val">{totalContacts.toLocaleString("fr-FR")}</div>
-          <div className="kpi-label">Contacts générés</div>
-          <div className="kpi-sub">lignes exportées</div>
-        </div>
-        <div className="card card-pad kpi">
-          <div className="kpi-top">
-            <div className="kpi-ico amber"><Icon name="alert" size={20} /></div>
-          </div>
-          <div className="kpi-val">{totalSiret}</div>
-          <div className="kpi-label">SIRET à confirmer</div>
-          <div className="kpi-sub">vérification manuelle</div>
-        </div>
-        <div className="card card-pad kpi">
-          <div className="kpi-top">
-            <div className="kpi-ico red"><Icon name="x" size={20} /></div>
-          </div>
-          <div className="kpi-val">{totalNoEmail}</div>
-          <div className="kpi-label">Sans email</div>
-          <div className="kpi-sub">contacts incomplets</div>
+      <div className="card card-pad">
+        <div className="sec-title" style={{ marginBottom: 14 }}>Comment ça marche</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          {[
+            { n: "1", t: "Importer", d: "Déposez votre export CSV Pharow ou Kaspr" },
+            { n: "2", t: "Vérifier le mapping", d: "Confirmez les correspondances colonnes → champs Odoo" },
+            { n: "3", t: "Convertir", d: "Résolution automatique des SIRET via l'API INSEE" },
+            { n: "4", t: "Télécharger", d: "Récupérez le CSV prêt à importer dans Odoo" },
+          ].map(s => (
+            <div key={s.n} style={{ display: "flex", alignItems: "center", gap: 14 }}>
+              <div style={{ width: 28, height: 28, borderRadius: "50%", background: "var(--red-soft)", color: "var(--red)", fontWeight: 700, fontSize: 13, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>{s.n}</div>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 14 }}>{s.t}</div>
+                <div style={{ fontSize: 13, color: "var(--ink-3)" }}>{s.d}</div>
+              </div>
+            </div>
+          ))}
         </div>
       </div>
-
     </div>
   );
 }
 
 // ── Convert wizard ─────────────────────────────────────────────────────────
 
-function ConvertWizard({ defaultLabel, onComplete }: {
+function ConvertWizard({ defaultLabel }: {
   defaultLabel: string;
-  onComplete: (record: ConversionRecord) => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const completedRef = useRef(false);
-  const onCompleteRef = useRef(onComplete);
-  useEffect(() => { onCompleteRef.current = onComplete; });
 
   const [step, setStep] = useState(0);
   const [drag, setDrag] = useState(false);
@@ -230,25 +193,6 @@ function ConvertWizard({ defaultLabel, onComplete }: {
   const [outputRows, setOutputRows] = useState<OdooRow[]>([]);
   const [stats, setStats] = useState({ total: 0, siretConfirmed: 0, siretToConfirm: 0, noEmail: 0 });
   const [csvData, setCsvData] = useState("");
-
-  // Fire onComplete AFTER step 3 is painted — no setTimeout needed
-  useEffect(() => {
-    if (step !== 3 || completedRef.current || !csvData) return;
-    completedRef.current = true;
-    const s = stats;
-    const status = s.noEmail === s.total && s.total > 0 ? "error" : s.siretToConfirm > 0 || s.noEmail > 0 ? "partial" : "success";
-    onCompleteRef.current({
-      id: `CV-${Date.now().toString().slice(-4)}`,
-      file: fileName,
-      date: new Date().toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }),
-      rows: rows.length,
-      contacts: s.total,
-      siretToConfirm: s.siretToConfirm,
-      noEmail: s.noEmail,
-      status,
-      csvData,
-    });
-  }, [step, csvData]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleFile = useCallback((file: File) => {
     const reader = new FileReader();
@@ -309,7 +253,6 @@ function ConvertWizard({ defaultLabel, onComplete }: {
   };
 
   const reset = () => {
-    completedRef.current = false;
     setStep(0); setFileName(""); setRows([]); setDetectedCols([]);
     setProgress(0); setProgressLabel(""); setOutputRows([]); setCsvData("");
     setStats({ total: 0, siretConfirmed: 0, siretToConfirm: 0, noEmail: 0 });
@@ -508,7 +451,7 @@ function ConvertWizard({ defaultLabel, onComplete }: {
           </div>
 
           <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".5px", textTransform: "uppercase", color: "var(--ink-3)", marginBottom: 10 }}>
-            Aperçu (10 premières lignes)
+            Aperçu — {outputRows.length} lignes
           </div>
           <div className="card tbl-wrap" style={{ boxShadow: "none" }}>
             <table className="tbl">
@@ -521,7 +464,7 @@ function ConvertWizard({ defaultLabel, onComplete }: {
                 </tr>
               </thead>
               <tbody>
-                {outputRows.slice(0, 10).map((r, i) => (
+                {outputRows.map((r, i) => (
                   <tr key={i}>
                     <td className="strong" style={{ paddingLeft: 16 }}>{r.name}</td>
                     <td>{r.job_position_id}</td>
@@ -579,85 +522,6 @@ function MappingView() {
       <div style={{ fontSize: 12.5, color: "var(--ink-3)", marginTop: 12, display: "flex", gap: 8, alignItems: "flex-start" }}>
         <Icon name="info" size={15} style={{ flexShrink: 0, marginTop: 1 }} />
         Le mapping est fixe pour les exports Pharow et Kaspr. La résolution SIRET se fait automatiquement via l&apos;API INSEE.
-      </div>
-    </div>
-  );
-}
-
-// ── History view ───────────────────────────────────────────────────────────
-
-function HistoryView({ history }: { history: ConversionRecord[] }) {
-  const [filter, setFilter] = useState("all");
-  const filters = [{ id: "all", l: "Tout" }, { id: "success", l: "Succès" }, { id: "partial", l: "Partiel" }, { id: "error", l: "Échec" }];
-  const shown = filter === "all" ? history : history.filter(r => r.status === filter);
-  const ordered = [...shown].reverse();
-
-  const download = (r: ConversionRecord) => {
-    const base64 = btoa(unescape(encodeURIComponent(r.csvData)));
-    const a = document.createElement("a");
-    a.href = `data:text/csv;base64,${base64}`;
-    a.download = `import_odoo_${r.id}.csv`;
-    a.click();
-  };
-
-  return (
-    <div className="view">
-      <div className="page-head">
-        <div>
-          <div className="page-title">Historique des conversions</div>
-          <div className="page-sub">Re-téléchargez un fichier généré à tout moment</div>
-        </div>
-      </div>
-
-      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-        {filters.map(f => (
-          <button key={f.id} onClick={() => setFilter(f.id)}
-            style={{ height: 34, padding: "0 14px", borderRadius: 999, border: "1px solid var(--line)", fontSize: 13, fontWeight: 500, cursor: "pointer", fontFamily: "var(--font)", background: filter === f.id ? "var(--ink)" : "#fff", color: filter === f.id ? "#fff" : "var(--ink-2)" }}>
-            {f.l}
-          </button>
-        ))}
-      </div>
-
-      <div className="card tbl-wrap">
-        {ordered.length === 0 ? (
-          <div className="empty-state">
-            <Icon name="clock" size={32} />
-            <p>Aucune conversion dans cet historique.</p>
-          </div>
-        ) : (
-          <table className="tbl">
-            <thead>
-              <tr>
-                <th style={{ paddingLeft: 20 }}>Réf.</th>
-                <th>Fichier source</th>
-                <th>Date</th>
-                <th>Contacts</th>
-                <th>SIRET ⚠</th>
-                <th>Sans email</th>
-                <th>Statut</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {ordered.map(r => (
-                <tr key={r.id}>
-                  <td className="mono strong" style={{ paddingLeft: 20 }}>{r.id}</td>
-                  <td className="strong">{r.file}</td>
-                  <td style={{ fontSize: 12 }}>{r.date}</td>
-                  <td>{r.contacts.toLocaleString("fr-FR")}</td>
-                  <td style={r.siretToConfirm > 0 ? { color: "var(--amber)", fontWeight: 600 } : {}}>{r.siretToConfirm || "—"}</td>
-                  <td style={r.noEmail > 0 ? { color: "var(--red)", fontWeight: 600 } : {}}>{r.noEmail || "—"}</td>
-                  <td><Badge status={r.status} /></td>
-                  <td style={{ textAlign: "right", paddingRight: 20 }}>
-                    <span className="cell-link" onClick={() => download(r)}>
-                      <Icon name="download" size={14} />Télécharger
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
       </div>
     </div>
   );
@@ -724,18 +588,15 @@ function SettingsView({ label, setLabel }: { label: string; setLabel: (v: string
 export default function Home() {
   const [active, setActive] = useState<View>("home");
   const [label, setLabel] = useState(LABELS[0].value);
-  const [history, setHistory] = useState<ConversionRecord[]>([]);
   const [convertKey, setConvertKey] = useState(0);
 
   const goNew = () => { setConvertKey(k => k + 1); setActive("convert"); };
   const navigate = (v: View) => { if (v === "convert") setConvertKey(k => k + 1); setActive(v); };
-  const addRecord = useCallback((r: ConversionRecord) => setHistory(h => [...h, r]), []);
 
   const views: Record<View, React.ReactNode> = {
-    home:     <Dashboard history={history} onNew={goNew} />,
-    convert:  <ConvertWizard defaultLabel={label} onComplete={addRecord} key={convertKey} />,
+    home:     <Dashboard onNew={goNew} />,
+    convert:  <ConvertWizard defaultLabel={label} key={convertKey} />,
     mapping:  <MappingView />,
-    history:  <HistoryView history={history} />,
     settings: <SettingsView label={label} setLabel={setLabel} />,
   };
 
