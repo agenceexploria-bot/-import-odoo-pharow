@@ -4,7 +4,6 @@ import { useRef, useState, useCallback } from "react";
 import { parsePharowCSV, PharowRow } from "@/lib/csvParser";
 import { resolveSiret, clearSiretCache } from "@/lib/siretClient";
 import { transformRow, toCsvString, OdooRow } from "@/lib/transform";
-import { matchPoste } from "@/lib/posteMatcher";
 
 const LABELS: { value: string; label: string; hint?: string }[] = [
   { value: "AW - A prospecter par BD (Audrey)", label: "AW - A prospecter par BD (Audrey)" },
@@ -111,14 +110,12 @@ export default function Home() {
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
-  // stats postes
   const posteCount: Record<string, number> = {};
   for (const r of outputRows) {
     posteCount[r.job_position_id] = (posteCount[r.job_position_id] ?? 0) + 1;
   }
   const sortedPostes = Object.entries(posteCount).sort((a, b) => b[1] - a[1]);
 
-  // stats entreprises
   const companyCount: Record<string, number> = {};
   for (const r of rows) {
     const c = r["Nom commercial"] ?? "—";
@@ -127,92 +124,118 @@ export default function Home() {
   const sortedCompanies = Object.entries(companyCount).sort((a, b) => b[1] - a[1]);
 
   return (
-    <div className="container">
-      <div className="logo">
-        <div>
-          <div className="logo-text">Import Odoo</div>
-          <div className="logo-sub">Pharow / Kaspr → Contacts Odoo · Actiwork</div>
+    <div className="page-shell">
+      {/* Header */}
+      <header className="header">
+        <div className="logo">
+          <div className="logo-mark">A<span>W</span></div>
+          <div className="logo-word">
+            <span className="acti">Acti</span><span className="conv">convert</span>
+          </div>
         </div>
-      </div>
+        <span className="header-sub">Pharow / Kaspr → Contacts Odoo</span>
+      </header>
 
-      {phase === "upload" && (
-        <>
-          <div className="card">
-            <div className="step-title">Étape 1 — Charger le fichier CSV</div>
-            <div
-              className={`dropzone${dragOver ? " drag-over" : ""}`}
-              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={onDrop}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <div className="dropzone-icon">📂</div>
-              <div className="dropzone-label">Glissez votre fichier CSV ici</div>
-              <div className="dropzone-hint">ou cliquez pour sélectionner</div>
-              <button className="dropzone-btn" type="button">Choisir un fichier</button>
+      <div className="container">
+        {phase === "upload" && (
+          <>
+            <div className="page-head">
+              <div className="page-title">Import Odoo</div>
+              <div className="page-sub">Chargez votre export Pharow ou Kaspr, choisissez un prospecteur, et téléchargez le CSV prêt pour Odoo.</div>
             </div>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".csv"
-              style={{ display: "none" }}
-              onChange={onFileChange}
-            />
-            {fileName && (
-              <div className="file-selected">
-                ✅ <strong>{fileName}</strong> — {rows.length} contacts détectés
+
+            {/* Step 1 — File */}
+            <div className="card">
+              <div className="step-label">
+                <span className="step-num">1</span>
+                Charger le fichier CSV
               </div>
-            )}
-          </div>
+              <div
+                className={`dropzone${dragOver ? " drag-over" : ""}`}
+                onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={onDrop}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <div className="dropzone-icon">📂</div>
+                <div className="dropzone-label">Glissez votre fichier CSV ici</div>
+                <div className="dropzone-hint">ou cliquez pour sélectionner</div>
+                <button className="dropzone-btn" type="button">Choisir un fichier</button>
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".csv"
+                style={{ display: "none" }}
+                onChange={onFileChange}
+              />
+              {fileName && (
+                <div className="file-selected">
+                  ✅ <strong>{fileName}</strong> — {rows.length} contacts détectés
+                </div>
+              )}
+            </div>
 
+            {/* Step 2 — Label */}
+            <div className="card">
+              <div className="step-label">
+                <span className="step-num">2</span>
+                Choisir l&apos;étiquette
+              </div>
+              <div className="radio-group">
+                {LABELS.map((l) => (
+                  <label
+                    key={l.value}
+                    className={`radio-label${label === l.value ? " checked" : ""}`}
+                  >
+                    <input
+                      type="radio"
+                      name="label"
+                      value={l.value}
+                      checked={label === l.value}
+                      onChange={() => setLabel(l.value)}
+                    />
+                    {l.label}
+                    {l.hint && <span className="radio-hint">({l.hint})</span>}
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <button
+              className="btn-primary"
+              disabled={!rows.length}
+              onClick={runProcessing}
+            >
+              Lancer le traitement →
+            </button>
+          </>
+        )}
+
+        {phase === "processing" && (
           <div className="card">
-            <div className="step-title">Étape 2 — Choisir l&apos;étiquette</div>
-            <div className="radio-group">
-              {LABELS.map((l) => (
-                <label
-                  key={l.value}
-                  className={`radio-label${label === l.value ? " checked" : ""}`}
-                >
-                  <input
-                    type="radio"
-                    name="label"
-                    value={l.value}
-                    checked={label === l.value}
-                    onChange={() => setLabel(l.value)}
-                  />
-                  {l.label}
-                  {l.hint && <span style={{ fontSize: 12, marginLeft: 8, color: "#94a3b8" }}>({l.hint})</span>}
-                </label>
-              ))}
+            <div className="processing-center">
+              <div className="spin" />
+              <div className="processing-title">Traitement en cours…</div>
+              <div className="processing-sub">Résolution des SIRET et mise au format Odoo</div>
+            </div>
+            <div className="progress-wrap">
+              <div className="progress-bar-bg">
+                <div className="progress-bar-fill" style={{ width: `${progress}%` }} />
+              </div>
+              <div className="progress-label">{progressLabel}</div>
+              <div className="progress-pct">{progress}%</div>
             </div>
           </div>
+        )}
 
-          <button
-            className="btn-primary"
-            disabled={!rows.length}
-            onClick={runProcessing}
-          >
-            Lancer le traitement →
-          </button>
-        </>
-      )}
-
-      {phase === "processing" && (
-        <div className="card">
-          <div className="step-title">Traitement en cours…</div>
-          <div className="progress-wrap">
-            <div className="progress-bar-bg">
-              <div className="progress-bar-fill" style={{ width: `${progress}%` }} />
-            </div>
-            <div className="progress-label">{progressLabel}</div>
-          </div>
-        </div>
-      )}
-
-      {phase === "results" && (
-        <>
+        {phase === "results" && (
           <div className="card">
-            <div className="step-title">Résultats</div>
+            <div className="step-label" style={{ marginBottom: 20 }}>
+              <span className="step-num" style={{ background: "var(--green)" }}>✓</span>
+              Résultats
+            </div>
+
             <div className="stats-grid">
               <div className="stat-card">
                 <div className="stat-value">{stats.total}</div>
@@ -281,7 +304,7 @@ export default function Home() {
             </div>
 
             <div className="actions">
-              <button className="btn-primary" style={{ flex: 2 }} onClick={downloadCsv}>
+              <button className="btn-primary" onClick={downloadCsv}>
                 ⬇ Télécharger le CSV Odoo
               </button>
               <button className="btn-secondary" onClick={reset}>
@@ -289,8 +312,8 @@ export default function Home() {
               </button>
             </div>
           </div>
-        </>
-      )}
+        )}
+      </div>
     </div>
   );
 }
