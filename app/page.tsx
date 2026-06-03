@@ -240,8 +240,8 @@ function Dashboard({ history, onNew }: { history: ConversionRecord[]; onNew: () 
 
 // ── Convert wizard ─────────────────────────────────────────────────────────
 
-function ConvertWizard({ label, onComplete }: {
-  label: string;
+function ConvertWizard({ defaultLabel, onComplete }: {
+  defaultLabel: string;
   onComplete: (record: ConversionRecord) => void;
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -250,6 +250,7 @@ function ConvertWizard({ label, onComplete }: {
   const [fileName, setFileName] = useState("");
   const [rows, setRows] = useState<PharowRow[]>([]);
   const [detectedCols, setDetectedCols] = useState<string[]>([]);
+  const [localLabel, setLocalLabel] = useState(defaultLabel);
   const [progress, setProgress] = useState(0);
   const [progressLabel, setProgressLabel] = useState("");
   const [outputRows, setOutputRows] = useState<OdooRow[]>([]);
@@ -286,7 +287,7 @@ function ConvertWizard({ label, onComplete }: {
       const siretResult = await resolveSiret(row, (msg) => {
         setProgressLabel(`${nom} ${prenom} — ${msg}`);
       });
-      result.push(transformRow(row, label, siretResult));
+      result.push(transformRow(row, localLabel, siretResult));
       setProgress(Math.round(((i + 1) / rows.length) * 100));
     }
     const csv = toCsvString(result);
@@ -301,18 +302,21 @@ function ConvertWizard({ label, onComplete }: {
     setCsvData(csv);
     setStep(3);
 
+    // Delay so step 3 renders before parent state update triggers re-render
     const status = s.noEmail === s.total ? "error" : s.siretToConfirm > 0 || s.noEmail > 0 ? "partial" : "success";
-    onComplete({
-      id: `CV-${Date.now().toString().slice(-4)}`,
-      file: fileName,
-      date: new Date().toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }),
-      rows: rows.length,
-      contacts: s.total,
-      siretToConfirm: s.siretToConfirm,
-      noEmail: s.noEmail,
-      status,
-      csvData: csv,
-    });
+    setTimeout(() => {
+      onComplete({
+        id: `CV-${Date.now().toString().slice(-4)}`,
+        file: fileName,
+        date: new Date().toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }),
+        rows: rows.length,
+        contacts: s.total,
+        siretToConfirm: s.siretToConfirm,
+        noEmail: s.noEmail,
+        status,
+        csvData: csv,
+      });
+    }, 100);
   };
 
   const downloadCsv = () => {
@@ -415,7 +419,22 @@ function ConvertWizard({ label, onComplete }: {
             <Icon name="info" size={14} style={{ flexShrink: 0 }} />
             Le mapping est fixe pour les exports Pharow/Kaspr. La résolution SIRET se fait via l&apos;API INSEE.
           </div>
-          <div className="row" style={{ gap: 10 }}>
+              {/* Prospecteur selector */}
+          <div className="card card-pad" style={{ marginTop: 12 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: ".6px", textTransform: "uppercase", color: "var(--ink-3)", marginBottom: 12 }}>
+              Prospecteur (étiquette Odoo)
+            </div>
+            <div className="radio-group-v">
+              {LABELS.map(l => (
+                <label key={l.value} className={`radio-label-v${localLabel === l.value ? " checked" : ""}`}>
+                  <input type="radio" name="wiz-label" value={l.value} checked={localLabel === l.value} onChange={() => setLocalLabel(l.value)} />
+                  {l.label}
+                </label>
+              ))}
+            </div>
+          </div>
+
+          <div className="row" style={{ gap: 10, marginTop: 12 }}>
             <Btn variant="ghost" onClick={() => setStep(0)}>Retour</Btn>
             <div className="spacer" />
             <Btn icon="convert" onClick={runConvert}>
@@ -698,13 +717,15 @@ export default function Home() {
   const [active, setActive] = useState<View>("home");
   const [label, setLabel] = useState(LABELS[0].value);
   const [history, setHistory] = useState<ConversionRecord[]>([]);
+  const [convertKey, setConvertKey] = useState(0);
 
-  const goNew = () => setActive("convert");
+  const goNew = () => { setConvertKey(k => k + 1); setActive("convert"); };
+  const navigate = (v: View) => { if (v === "convert") setConvertKey(k => k + 1); setActive(v); };
   const addRecord = (r: ConversionRecord) => setHistory(h => [...h, r]);
 
   const views: Record<View, React.ReactNode> = {
     home:     <Dashboard history={history} onNew={goNew} />,
-    convert:  <ConvertWizard label={label} onComplete={addRecord} key={history.length} />,
+    convert:  <ConvertWizard defaultLabel={label} onComplete={addRecord} key={convertKey} />,
     mapping:  <MappingView />,
     history:  <HistoryView history={history} />,
     settings: <SettingsView label={label} setLabel={setLabel} />,
@@ -734,7 +755,7 @@ export default function Home() {
       <nav className="sidebar">
         <div className="nav-section">Navigation</div>
         {NAV.map(n => (
-          <button key={n.id} className={`nav-item${active === n.id ? " active" : ""}`} onClick={() => setActive(n.id)}>
+          <button key={n.id} className={`nav-item${active === n.id ? " active" : ""}`} onClick={() => navigate(n.id)}>
             <span className="nav-ico"><Icon name={n.icon} size={18} /></span>
             {n.label}
           </button>
