@@ -12,7 +12,7 @@ interface SiretRequest {
 interface SiretResponse {
   siret: string;
   confirmer: boolean;
-  source: "cache" | "api-gov" | "pappers" | "claude" | "fallback";
+  source: "cache" | "api-gov" | "pappers" | "openai" | "fallback";
 }
 
 // cache serveur par SIREN+ville (persiste entre requêtes dans le process)
@@ -29,6 +29,7 @@ async function throttle() {
   lastApiCall = Date.now();
 }
 
+// ─── Étape 1 : API gouvernementale (gratuit) ─────────────────────────────────
 async function searchApiGov(
   nomCommercial: string,
   siren: string,
@@ -71,6 +72,7 @@ async function searchApiGov(
   const villeNorm = ville.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
 
   // chercher un établissement ouvert dans la bonne ville
+  // cpMatch: false par défaut → ne pas accepter un établissement d'une autre ville
   const candidats = etabs.filter((e) => {
     if (e.etat_administratif !== "A") return false;
     const libNorm = (e.libelle_commune ?? "")
@@ -88,6 +90,7 @@ async function searchApiGov(
   return (nonSiege ?? candidats[0]).siret;
 }
 
+// ─── Étape 2 : Pappers (si clé disponible) ───────────────────────────────────
 async function searchPappers(
   siren: string,
   ville: string,
@@ -117,6 +120,7 @@ async function searchPappers(
   const candidats = etabs.filter((e) => {
     if (e.ferme) return false;
     const eVille = (e.ville ?? "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+    // cpMatch: false par défaut + garde eVille non-vide pour éviter "".includes() = true
     const cpMatch = codePostal ? e.code_postal === codePostal : false;
     return (eVille && (eVille.includes(villeNorm) || villeNorm.includes(eVille))) || cpMatch;
   });
@@ -126,31 +130,27 @@ async function searchPappers(
   return (nonSiege ?? candidats[0]).siret ?? null;
 }
 
-async function searchClaude(
+// ─── Étape 3 : OpenAI avec web search (fallback IA) ──────────────────────────
+async function searchOpenAI(
   nomCommercial: string,
   siren: string,
   ville: string
 ): Promise<string | null> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return null;
 
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const prompt = `Trouve le SIRET de l'établissement de "${nomCommercial}" (SIREN ${siren}) situé à ${ville}. Je veux le SIRET de l'établissement local, PAS le siège. Réponds UNIQUEMENT avec le SIRET à 14 chiffres ou "INTROUVABLE".`;
+
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
+      Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 200,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
-      messages: [
-        {
-          role: "user",
-          content: `Trouve le SIRET de l'établissement de "${nomCommercial}" (SIREN ${siren}) situé à ${ville}. Je veux le SIRET de l'établissement local, PAS le siège. Réponds UNIQUEMENT avec le SIRET à 14 chiffres ou "INTROUVABLE".`,
-        },
-      ],
+      model: "gpt-4o-search-preview",
+      messages: [{ role: "user", content: prompt }],
+      max_tokens: 50,
     }),
     signal: AbortSignal.timeout(30000),
   });
@@ -158,17 +158,14 @@ async function searchClaude(
   if (!res.ok) return null;
   const data = await res.json();
 
-  const text: string =
-    data.content
-      ?.filter((b: { type: string }) => b.type === "text")
-      ?.map((b: { text: string }) => b.text)
-      ?.join("") ?? "";
-
-  const match = text.match(/\b(\d{14})\b/);
+  const answer: string = data.choices?.[0]?.message?.content?.trim() ?? "";
+  const match = answer.match(/\b(\d{14})\b/);
+  // vérifier que le SIRET trouvé appartient bien au bon SIREN
   if (match && match[1].startsWith(siren)) return match[1];
   return null;
 }
 
+// ─── Handler principal ────────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
   const body: SiretRequest = await req.json();
   const { nomCommercial, siren, siretSiege, ville, codePostal, departement } = body;
@@ -187,56 +184,44 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(serverCache.get(cacheKey)!);
   }
 
-  // Étape 1 — API gouvernementale
+  // Étape 1 — API gouvernementale (gratuit, rapide)
   try {
     const siret = await searchApiGov(nomCommercial, siren, ville, codePostal, departement);
     if (siret) {
       const result: SiretResponse = { siret, confirmer: false, source: "api-gov" };
       serverCache.set(cacheKey, result);
-      if (process.env.NODE_ENV === "development") {
-        console.log(`[SIRET] ${nomCommercial} / ${ville} → API-GOV → ${siret}`);
-      }
       return NextResponse.json(result);
     }
-  } catch (e) {
-    if (process.env.NODE_ENV === "development") console.warn("[SIRET] API-GOV error:", e);
+  } catch {
+    // timeout ou erreur réseau → étape suivante
   }
 
-  // Étape 2 — Pappers
+  // Étape 2 — Pappers (si clé disponible)
   try {
     const siret = await searchPappers(siren, ville, codePostal);
     if (siret) {
       const result: SiretResponse = { siret, confirmer: false, source: "pappers" };
       serverCache.set(cacheKey, result);
-      if (process.env.NODE_ENV === "development") {
-        console.log(`[SIRET] ${nomCommercial} / ${ville} → PAPPERS → ${siret}`);
-      }
       return NextResponse.json(result);
     }
-  } catch (e) {
-    if (process.env.NODE_ENV === "development") console.warn("[SIRET] Pappers error:", e);
+  } catch {
+    // timeout ou erreur réseau → étape suivante
   }
 
-  // Étape 3 — Claude API + web_search
+  // Étape 3 — OpenAI avec web search
   try {
-    const siret = await searchClaude(nomCommercial, siren, ville);
+    const siret = await searchOpenAI(nomCommercial, siren, ville);
     if (siret) {
-      const result: SiretResponse = { siret, confirmer: false, source: "claude" };
+      const result: SiretResponse = { siret, confirmer: false, source: "openai" };
       serverCache.set(cacheKey, result);
-      if (process.env.NODE_ENV === "development") {
-        console.log(`[SIRET] ${nomCommercial} / ${ville} → CLAUDE → ${siret}`);
-      }
       return NextResponse.json(result);
     }
-  } catch (e) {
-    if (process.env.NODE_ENV === "development") console.warn("[SIRET] Claude error:", e);
+  } catch {
+    // timeout ou erreur réseau → fallback
   }
 
-  // Fallback
+  // Fallback — SIRET du siège à confirmer
   const fallback: SiretResponse = { siret: siretSiege ?? "", confirmer: true, source: "fallback" };
   serverCache.set(cacheKey, fallback);
-  if (process.env.NODE_ENV === "development") {
-    console.log(`[SIRET] ${nomCommercial} / ${ville} → FALLBACK → ${siretSiege}`);
-  }
   return NextResponse.json(fallback);
 }
