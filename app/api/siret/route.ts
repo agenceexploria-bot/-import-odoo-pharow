@@ -77,7 +77,7 @@ async function searchApiGov(
       .toLowerCase()
       .normalize("NFD")
       .replace(/[̀-ͯ]/g, "");
-    const cpMatch = codePostal ? e.code_postal === codePostal : true;
+    const cpMatch = codePostal ? e.code_postal === codePostal : false;
     return libNorm.includes(villeNorm) || cpMatch;
   });
 
@@ -117,8 +117,8 @@ async function searchPappers(
   const candidats = etabs.filter((e) => {
     if (e.ferme) return false;
     const eVille = (e.ville ?? "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
-    const cpMatch = codePostal ? e.code_postal === codePostal : true;
-    return eVille.includes(villeNorm) || villeNorm.includes(eVille) || cpMatch;
+    const cpMatch = codePostal ? e.code_postal === codePostal : false;
+    return (eVille && (eVille.includes(villeNorm) || villeNorm.includes(eVille))) || cpMatch;
   });
 
   if (candidats.length === 0) return null;
