@@ -138,16 +138,63 @@ async function searchPappers(
   return (nonSiege ?? candidats[0]).siret ?? null;
 }
 
+// ─── Vérification d'un SIRET via l'API gouvernementale ───────────────────────
+// Confirme qu'un SIRET (peu importe sa provenance) existe, est ACTIF, et que sa
+// commune correspond bien à la ville attendue. Évite d'accepter une hallucination
+// de l'IA ou un SIRET d'une autre ville. Retourne true si le SIRET est valide.
+async function verifySiret(
+  siret: string,
+  ville: string,
+  codePostal?: string
+): Promise<boolean> {
+  await throttle();
+
+  const url = `https://recherche-entreprises.api.gouv.fr/search?q=${siret}&per_page=5`;
+  const res = await fetch(url, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) return false;
+
+  const data = await res.json();
+  const results: Array<{
+    matching_etablissements?: Array<{
+      siret: string;
+      etat_administratif: string;
+      libelle_commune: string;
+      code_postal: string;
+    }>;
+  }> = data.results ?? [];
+
+  const villeNorm = norm(ville);
+  for (const r of results) {
+    const etab = (r.matching_etablissements ?? []).find((e) => e.siret === siret);
+    if (!etab) continue;
+    if (etab.etat_administratif !== "A") return false; // fermé → refusé
+    const cpMatch = codePostal ? etab.code_postal === codePostal : false;
+    return villeMatch(etab.libelle_commune, villeNorm) || cpMatch;
+  }
+  return false;
+}
+
 // ─── Étape 3 : OpenAI avec web search (si OPENAI_API_KEY disponible) ──────────
+// Cas difficiles : grands groupes éclatés en plusieurs entités juridiques
+// (ex: Airbus Helicopters / Airbus Atlantic — SIREN différents). Le contact peut
+// travailler dans un établissement d'un AUTRE SIREN que celui du fichier.
+// On laisse donc OpenAI proposer un SIRET sans contrainte de SIREN, PUIS on le
+// vérifie systématiquement via l'API gouvernementale (existe + actif + bonne ville).
 async function searchOpenAI(
   nomCommercial: string,
   siren: string,
-  ville: string
+  ville: string,
+  codePostal?: string
 ): Promise<string | null> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return null;
 
-  const prompt = `Trouve le SIRET de l'établissement de "${nomCommercial}" (SIREN ${siren}) situé à ${ville}. Je veux le SIRET de l'établissement local, PAS le siège. Réponds UNIQUEMENT avec le SIRET à 14 chiffres ou "INTROUVABLE".`;
+  const prompt = `Trouve le SIRET (14 chiffres) de l'établissement où travaille un salarié de "${nomCommercial}" (groupe SIREN ${siren}) situé à ${ville}${
+    codePostal ? ` (code postal ${codePostal})` : ""
+  }. Je veux l'établissement LOCAL à ${ville}, PAS le siège social. Attention : dans les grands groupes, cet établissement peut appartenir à une filiale au SIREN différent (ex: Airbus Helicopters vs Airbus Atlantic). Réponds UNIQUEMENT avec le SIRET à 14 chiffres, sans espace, ou le mot INTROUVABLE.`;
 
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -168,9 +215,12 @@ async function searchOpenAI(
 
   const answer: string = data.choices?.[0]?.message?.content?.trim() ?? "";
   const match = answer.match(/\b(\d{14})\b/);
-  // vérifier que le SIRET appartient bien au bon SIREN
-  if (match && match[1].startsWith(siren)) return match[1];
-  return null;
+  if (!match) return null;
+
+  const siret = match[1];
+  // Vérification gouvernementale obligatoire avant d'accepter (anti-hallucination).
+  const ok = await verifySiret(siret, ville, codePostal);
+  return ok ? siret : null;
 }
 
 // ─── Handler principal ────────────────────────────────────────────────────────
@@ -213,7 +263,7 @@ export async function POST(req: NextRequest) {
 
   // Étape 3 — OpenAI web search (si OPENAI_API_KEY configurée)
   try {
-    const siret = await searchOpenAI(nomCommercial, siren, ville);
+    const siret = await searchOpenAI(nomCommercial, siren, ville, codePostal);
     if (siret) {
       const result: SiretResponse = { siret, confirmer: false, source: "openai" };
       serverCache.set(cacheKey, result);
