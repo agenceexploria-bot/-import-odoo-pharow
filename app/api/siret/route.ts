@@ -12,7 +12,7 @@ interface SiretRequest {
 interface SiretResponse {
   siret: string;
   confirmer: boolean;
-  source: "cache" | "api-gov" | "annuaire" | "pappers" | "openai" | "fallback";
+  source: "cache" | "api-gov" | "pappers" | "openai" | "fallback";
 }
 
 // cache serveur par SIREN+ville (persiste entre requêtes dans le process)
@@ -41,9 +41,9 @@ function villeMatch(libelle: string, villeNorm: string) {
   return l.includes(villeNorm) || villeNorm.includes(l);
 }
 
-// ─── Étape 1 : recherche-entreprises.api.gouv.fr ─────────────────────────────
-// https://recherche-entreprises.api.gouv.fr
-// Recherche par nom + commune/code postal → retourne les matching_etablissements
+// ─── Étape 1 : recherche-entreprises.api.gouv.fr (API gouvernementale gratuite) ─
+// C'est l'API officielle qui alimente aussi le site annuaire-entreprises.data.gouv.fr.
+// On cherche par nom + ville/code postal → matching_etablissements filtrés sur ce lieu.
 async function searchApiGov(
   nomCommercial: string,
   siren: string,
@@ -54,9 +54,11 @@ async function searchApiGov(
   await throttle();
 
   const params = new URLSearchParams({ q: nomCommercial, per_page: "25" });
+  // Le paramètre `commune` attend un code INSEE, pas un nom → on privilégie
+  // code_postal (5 chiffres) puis departement (2 chiffres). Sinon, recherche
+  // texte simple et filtrage local sur le libellé de commune.
   if (codePostal) params.set("code_postal", codePostal);
   else if (departement) params.set("departement", departement);
-  else params.set("commune", ville);
 
   const url = `https://recherche-entreprises.api.gouv.fr/search?${params}`;
 
@@ -84,7 +86,7 @@ async function searchApiGov(
   const etabs = entreprise.matching_etablissements ?? [];
   const villeNorm = norm(ville);
 
-  // cpMatch: false par défaut → ne pas accepter un établissement d'une autre ville
+  // cpMatch: false par défaut → ne JAMAIS accepter un établissement d'une autre ville
   const candidats = etabs.filter((e) => {
     if (e.etat_administratif !== "A") return false;
     const cpMatch = codePostal ? e.code_postal === codePostal : false;
@@ -96,47 +98,9 @@ async function searchApiGov(
   return (nonSiege ?? candidats[0]).siret;
 }
 
-// ─── Étape 2 : annuaire-entreprises.data.gouv.fr ─────────────────────────────
-// https://annuaire-entreprises.data.gouv.fr
-// Récupère TOUS les établissements d'un SIREN via l'API de l'annuaire officiel
-async function searchAnnuaire(
-  siren: string,
-  ville: string,
-  codePostal?: string
-): Promise<string | null> {
-  await throttle();
-
-  const url = `https://api.annuaire-entreprises.data.gouv.fr/etablissements?siren=${siren}&nombre_resultats_par_page=100&page=1`;
-
-  const res = await fetch(url, {
-    headers: { Accept: "application/json" },
-    signal: AbortSignal.timeout(8000),
-  });
-  if (!res.ok) return null;
-
-  const data = await res.json();
-  const etabs: Array<{
-    siret: string;
-    etat_administratif: string;
-    libelle_commune?: string;
-    code_postal?: string;
-    est_siege?: boolean;
-  }> = data.results ?? [];
-
-  const villeNorm = norm(ville);
-
-  const candidats = etabs.filter((e) => {
-    if (e.etat_administratif !== "A") return false;
-    const cpMatch = codePostal ? e.code_postal === codePostal : false;
-    return villeMatch(e.libelle_commune ?? "", villeNorm) || cpMatch;
-  });
-
-  if (candidats.length === 0) return null;
-  const nonSiege = candidats.find((e) => !e.est_siege);
-  return (nonSiege ?? candidats[0]).siret;
-}
-
-// ─── Étape 3 : Pappers (si clé disponible) ───────────────────────────────────
+// ─── Étape 2 : Pappers (si PAPPERS_API_KEY disponible) ───────────────────────
+// Pappers retourne TOUS les établissements d'un SIREN (utile quand l'étape 1,
+// limitée aux établissements correspondant à la recherche, ne trouve rien).
 async function searchPappers(
   siren: string,
   ville: string,
@@ -174,7 +138,7 @@ async function searchPappers(
   return (nonSiege ?? candidats[0]).siret ?? null;
 }
 
-// ─── Étape 4 : OpenAI avec web search ────────────────────────────────────────
+// ─── Étape 3 : OpenAI avec web search (si OPENAI_API_KEY disponible) ──────────
 async function searchOpenAI(
   nomCommercial: string,
   siren: string,
@@ -227,7 +191,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(serverCache.get(cacheKey)!);
   }
 
-  // Étape 1 — recherche-entreprises.api.gouv.fr
+  // Étape 1 — recherche-entreprises.api.gouv.fr (gratuit)
   try {
     const siret = await searchApiGov(nomCommercial, siren, ville, codePostal, departement);
     if (siret) {
@@ -237,17 +201,7 @@ export async function POST(req: NextRequest) {
     }
   } catch { /* timeout ou erreur réseau */ }
 
-  // Étape 2 — annuaire-entreprises.data.gouv.fr
-  try {
-    const siret = await searchAnnuaire(siren, ville, codePostal);
-    if (siret) {
-      const result: SiretResponse = { siret, confirmer: false, source: "annuaire" };
-      serverCache.set(cacheKey, result);
-      return NextResponse.json(result);
-    }
-  } catch { /* timeout ou erreur réseau */ }
-
-  // Étape 3 — Pappers (si PAPPERS_API_KEY configurée)
+  // Étape 2 — Pappers (si PAPPERS_API_KEY configurée)
   try {
     const siret = await searchPappers(siren, ville, codePostal);
     if (siret) {
@@ -257,7 +211,7 @@ export async function POST(req: NextRequest) {
     }
   } catch { /* timeout ou erreur réseau */ }
 
-  // Étape 4 — OpenAI web search (si OPENAI_API_KEY configurée)
+  // Étape 3 — OpenAI web search (si OPENAI_API_KEY configurée)
   try {
     const siret = await searchOpenAI(nomCommercial, siren, ville);
     if (siret) {
