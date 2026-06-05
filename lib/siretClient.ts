@@ -4,7 +4,7 @@ import { parseVille } from "./villeParser";
 export interface SiretResult {
   siret: string;
   confirmer: boolean;
-  source: "cache" | "api-gov" | "pappers" | "openai" | "fallback";
+  source: "cache" | "api-gov" | "annuaire" | "pappers" | "openai" | "fallback";
 }
 
 // cache côté front par SIREN+ville
