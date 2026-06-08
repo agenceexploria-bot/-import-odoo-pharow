@@ -422,6 +422,17 @@ function ConvertWizard({ defaultLabel }: {
             <div style={{ fontSize: 13, color: "var(--ink-3)", marginTop: 5 }}>
               Votre fichier est prêt à importer dans Odoo
             </div>
+            {fileName && (
+              <div style={{ display: "inline-flex", alignItems: "center", gap: 8, marginTop: 12, padding: "6px 12px", background: "var(--bg-2)", border: "1px solid var(--line)", borderRadius: 8, fontSize: 12, color: "var(--ink-2)" }}>
+                <Icon name="fileCheck" size={14} />
+                <span>
+                  Fichier source : <strong>{fileName}</strong>
+                  {rows[0]?.["Nom de la liste Pharow"] && (
+                    <> · liste « {rows[0]["Nom de la liste Pharow"]} »</>
+                  )}
+                </span>
+              </div>
+            )}
           </div>
 
           <div className="result-grid">
