@@ -5,7 +5,7 @@ export interface SiretResult {
   siret: string;
   adresse: string;
   confirmer: boolean;
-  source: "cache" | "api-gov" | "pappers" | "openai" | "fallback";
+  source: "cache" | "api-gov" | "groupe" | "pappers" | "openai" | "fallback";
 }
 
 // cache côté front par SIREN+ville

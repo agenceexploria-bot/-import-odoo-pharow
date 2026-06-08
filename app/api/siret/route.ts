@@ -13,7 +13,7 @@ interface SiretResponse {
   siret: string;
   adresse: string; // adresse de l'établissement trouvé (aperçu uniquement)
   confirmer: boolean;
-  source: "cache" | "api-gov" | "pappers" | "openai" | "fallback";
+  source: "cache" | "api-gov" | "groupe" | "pappers" | "openai" | "fallback";
 }
 
 // résultat interne d'une recherche : SIRET + adresse de l'établissement
@@ -113,7 +113,71 @@ async function searchApiGov(
   return { siret: choisi.siret, adresse: choisi.adresse ?? "" };
 }
 
-// ─── Étape 2 : Pappers (si PAPPERS_API_KEY disponible) ───────────────────────
+// ─── Étape 2 : recherche par nom commercial + ville, TOUS SIREN du groupe ────
+// Gère les groupes éclatés en filiales (ex: NEO2 → NEO2 NORD à Lille, NEO2 RA à
+// Lyon ; SIREN différents). On cherche par nom + lieu et on accepte tout
+// établissement actif dont le nom d'entreprise correspond au nom commercial.
+// Gratuit et déterministe (tri stable des candidats).
+async function searchGroupeByNom(
+  nomCommercial: string,
+  ville: string,
+  codePostal?: string,
+  departement?: string
+): Promise<EtabResult | null> {
+  if (!codePostal && !departement) return null; // sans localisation → trop large
+  await throttle();
+
+  const params = new URLSearchParams({ q: nomCommercial, per_page: "25" });
+  if (codePostal) params.set("code_postal", codePostal);
+  else if (departement) params.set("departement", departement);
+
+  const url = `https://recherche-entreprises.api.gouv.fr/search?${params}`;
+  const res = await fetch(url, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) return null;
+
+  const data = await res.json();
+  const results: Array<{
+    nom_complet?: string;
+    matching_etablissements?: Array<{
+      siret: string;
+      etat_administratif: string;
+      libelle_commune: string;
+      code_postal: string;
+      adresse?: string;
+      etablissement_siege: boolean;
+    }>;
+  }> = data.results ?? [];
+
+  const villeNorm = norm(ville);
+  const candidats: Array<{ siret: string; adresse: string; siege: boolean }> = [];
+
+  for (const r of results) {
+    // l'entreprise trouvée doit porter le nom commercial recherché (ex: "neo2")
+    if (!nomMatch(r.nom_complet ?? "", nomCommercial)) continue;
+    for (const e of r.matching_etablissements ?? []) {
+      if (e.etat_administratif !== "A") continue;
+      const cpMatch = codePostal ? e.code_postal === codePostal : false;
+      if (!villeMatch(e.libelle_commune, villeNorm) && !cpMatch) continue;
+      candidats.push({
+        siret: e.siret,
+        adresse: e.adresse ?? "",
+        siege: e.etablissement_siege,
+      });
+    }
+  }
+
+  if (candidats.length === 0) return null;
+  // déterminisme : non-siège d'abord, puis tri par SIRET croissant
+  candidats.sort((a, b) =>
+    a.siege === b.siege ? a.siret.localeCompare(b.siret) : a.siege ? 1 : -1
+  );
+  return { siret: candidats[0].siret, adresse: candidats[0].adresse };
+}
+
+// ─── Étape 3 : Pappers (si PAPPERS_API_KEY disponible, tous établissements) ──
 async function searchPappers(
   siren: string,
   ville: string,
@@ -206,7 +270,7 @@ async function verifySiret(
   return null;
 }
 
-// ─── Étape 3 : OpenAI avec web search (si OPENAI_API_KEY disponible) ──────────
+// ─── Étape 4 : OpenAI avec web search (si OPENAI_API_KEY disponible) ──────────
 // Cas difficiles : grands groupes éclatés en plusieurs entités juridiques
 // (ex: Airbus Helicopters / Airbus Atlantic, Neo2 / Neo2 RA — SIREN différents).
 // OpenAI propose un SIRET sans contrainte de SIREN, PUIS verifySiret valide tout.
@@ -278,13 +342,19 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(result);
   };
 
-  // Étape 1 — recherche-entreprises.api.gouv.fr (gratuit)
+  // Étape 1 — recherche-entreprises.api.gouv.fr, SIREN strict (gratuit)
   try {
     const etab = await searchApiGov(nomCommercial, siren, ville, codePostal, departement);
     if (etab) return finish(etab, "api-gov");
   } catch { /* timeout ou erreur réseau */ }
 
-  // Étape 2 — Pappers (si PAPPERS_API_KEY configurée)
+  // Étape 2 — recherche par nom commercial + ville, tous SIREN du groupe (gratuit)
+  try {
+    const etab = await searchGroupeByNom(nomCommercial, ville, codePostal, departement);
+    if (etab) return finish(etab, "groupe");
+  } catch { /* timeout ou erreur réseau */ }
+
+  // Étape 3 — Pappers (si PAPPERS_API_KEY configurée)
   try {
     const etab = await searchPappers(siren, ville, codePostal);
     if (etab) return finish(etab, "pappers");
