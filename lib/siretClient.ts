@@ -3,6 +3,7 @@ import { parseVille } from "./villeParser";
 
 export interface SiretResult {
   siret: string;
+  adresse: string;
   confirmer: boolean;
   source: "cache" | "api-gov" | "pappers" | "openai" | "fallback";
 }
@@ -48,6 +49,7 @@ export async function resolveSiret(
   } catch {
     const fallback: SiretResult = {
       siret: siretSiege,
+      adresse: "",
       confirmer: true,
       source: "fallback",
     };

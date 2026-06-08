@@ -463,6 +463,7 @@ function ConvertWizard({ defaultLabel }: {
                   <th>Poste Odoo</th>
                   <th>Email</th>
                   <th>SIRET</th>
+                  <th>Adresse établissement</th>
                 </tr>
               </thead>
               <tbody>
@@ -477,6 +478,7 @@ function ConvertWizard({ defaultLabel }: {
                       <span className="mono">{r.SIRET || "—"}</span>
                       {r.comment && <div className="confirmer">⚠ {r.comment}</div>}
                     </td>
+                    <td style={{ fontSize: 12, color: "var(--ink-3)" }}>{r._adresse || "—"}</td>
                   </tr>
                 ))}
               </tbody>

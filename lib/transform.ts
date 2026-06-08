@@ -16,6 +16,7 @@ export interface OdooRow {
   category_id: string;
   source_contact: string;
   _ville: string; // colonne interne — exclue du CSV final
+  _adresse: string; // adresse de l'établissement — aperçu uniquement, exclue du CSV
 }
 
 function formatName(nom: string, prenom: string): string {
@@ -43,9 +44,11 @@ function formatMobile(tel1: string, tel2: string, tel3: string): string {
 export function transformRow(
   row: PharowRow,
   categoryId: string,
-  siretResult: { siret: string; confirmer: boolean }
+  siretResult: { siret: string; confirmer: boolean; adresse?: string }
 ): OdooRow {
   const villeInfo = parseVille(row["Ville de résidence"] ?? "");
+  // adresse de l'établissement trouvé ; à défaut, adresse du siège du fichier
+  const adresseEtab = siretResult.adresse || (row["Adresse du siège complète"] ?? "");
 
   return {
     email: row["Email"] ?? "",
@@ -65,6 +68,7 @@ export function transformRow(
     category_id: categoryId,
     source_contact: "Marketing",
     _ville: villeInfo.ville,
+    _adresse: adresseEtab,
   };
 }
 

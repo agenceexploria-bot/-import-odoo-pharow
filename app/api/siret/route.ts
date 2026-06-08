@@ -11,9 +11,13 @@ interface SiretRequest {
 
 interface SiretResponse {
   siret: string;
+  adresse: string; // adresse de l'établissement trouvé (aperçu uniquement)
   confirmer: boolean;
   source: "cache" | "api-gov" | "pappers" | "openai" | "fallback";
 }
+
+// résultat interne d'une recherche : SIRET + adresse de l'établissement
+type EtabResult = { siret: string; adresse: string };
 
 // cache serveur par SIREN+ville (persiste entre requêtes dans le process)
 const serverCache = new Map<string, SiretResponse>();
@@ -41,22 +45,32 @@ function villeMatch(libelle: string, villeNorm: string) {
   return l.includes(villeNorm) || villeNorm.includes(l);
 }
 
+/** Vérifie qu'un nom d'entreprise trouvé correspond au nom commercial recherché.
+ *  Exige qu'au moins un mot significatif (≥3 lettres) soit commun. Bloque les
+ *  faux positifs d'OpenAI (société sans rapport) tout en acceptant les filiales
+ *  (ex: "Neo2" ⊂ "NEO2 RA", "Airbus" ⊂ "Airbus Atlantic"). */
+function nomMatch(nomTrouve: string, nomCommercial: string) {
+  const cible = norm(nomTrouve);
+  const tokens = norm(nomCommercial)
+    .split(/[^a-z0-9]+/)
+    .filter((t) => t.length >= 3);
+  if (tokens.length === 0) return true; // pas de nom exploitable → on ne bloque pas
+  return tokens.some((t) => cible.includes(t));
+}
+
 // ─── Étape 1 : recherche-entreprises.api.gouv.fr (API gouvernementale gratuite) ─
 // C'est l'API officielle qui alimente aussi le site annuaire-entreprises.data.gouv.fr.
-// On cherche par nom + ville/code postal → matching_etablissements filtrés sur ce lieu.
 async function searchApiGov(
   nomCommercial: string,
   siren: string,
   ville: string,
   codePostal?: string,
   departement?: string
-): Promise<string | null> {
+): Promise<EtabResult | null> {
   await throttle();
 
   const params = new URLSearchParams({ q: nomCommercial, per_page: "25" });
-  // Le paramètre `commune` attend un code INSEE, pas un nom → on privilégie
-  // code_postal (5 chiffres) puis departement (2 chiffres). Sinon, recherche
-  // texte simple et filtrage local sur le libellé de commune.
+  // `commune` attend un code INSEE → on privilégie code_postal puis departement.
   if (codePostal) params.set("code_postal", codePostal);
   else if (departement) params.set("departement", departement);
 
@@ -76,6 +90,7 @@ async function searchApiGov(
       etat_administratif: string;
       libelle_commune: string;
       code_postal: string;
+      adresse?: string;
       etablissement_siege: boolean;
     }>;
   }> = data.results ?? [];
@@ -94,18 +109,16 @@ async function searchApiGov(
   });
 
   if (candidats.length === 0) return null;
-  const nonSiege = candidats.find((e) => !e.etablissement_siege);
-  return (nonSiege ?? candidats[0]).siret;
+  const choisi = candidats.find((e) => !e.etablissement_siege) ?? candidats[0];
+  return { siret: choisi.siret, adresse: choisi.adresse ?? "" };
 }
 
 // ─── Étape 2 : Pappers (si PAPPERS_API_KEY disponible) ───────────────────────
-// Pappers retourne TOUS les établissements d'un SIREN (utile quand l'étape 1,
-// limitée aux établissements correspondant à la recherche, ne trouve rien).
 async function searchPappers(
   siren: string,
   ville: string,
   codePostal?: string
-): Promise<string | null> {
+): Promise<EtabResult | null> {
   const apiKey = process.env.PAPPERS_API_KEY;
   if (!apiKey || !siren) return null;
 
@@ -123,6 +136,7 @@ async function searchPappers(
     ferme?: boolean;
     ville?: string;
     code_postal?: string;
+    adresse_ligne_1?: string;
   }> = data.etablissements ?? [];
 
   const villeNorm = norm(ville);
@@ -134,19 +148,23 @@ async function searchPappers(
   });
 
   if (candidats.length === 0) return null;
-  const nonSiege = candidats.find((e) => !e.siege);
-  return (nonSiege ?? candidats[0]).siret ?? null;
+  const choisi = candidats.find((e) => !e.siege) ?? candidats[0];
+  const adresse = [choisi.adresse_ligne_1, choisi.code_postal, choisi.ville]
+    .filter(Boolean)
+    .join(" ");
+  return { siret: choisi.siret ?? "", adresse };
 }
 
 // ─── Vérification d'un SIRET via l'API gouvernementale ───────────────────────
-// Confirme qu'un SIRET (peu importe sa provenance) existe, est ACTIF, et que sa
-// commune correspond bien à la ville attendue. Évite d'accepter une hallucination
-// de l'IA ou un SIRET d'une autre ville. Retourne true si le SIRET est valide.
+// Confirme qu'un SIRET (peu importe sa provenance) existe, est ACTIF, que sa
+// commune correspond à la ville attendue ET que le nom de l'entreprise correspond
+// au nom commercial recherché. Retourne l'adresse si valide, sinon null.
 async function verifySiret(
   siret: string,
+  nomCommercial: string,
   ville: string,
   codePostal?: string
-): Promise<boolean> {
+): Promise<EtabResult | null> {
   await throttle();
 
   const url = `https://recherche-entreprises.api.gouv.fr/search?q=${siret}&per_page=5`;
@@ -154,15 +172,19 @@ async function verifySiret(
     headers: { Accept: "application/json" },
     signal: AbortSignal.timeout(8000),
   });
-  if (!res.ok) return false;
+  if (!res.ok) return null;
 
   const data = await res.json();
   const results: Array<{
+    nom_complet?: string;
     matching_etablissements?: Array<{
       siret: string;
       etat_administratif: string;
       libelle_commune: string;
       code_postal: string;
+      adresse?: string;
+      nom_commercial?: string;
+      liste_enseignes?: string[];
     }>;
   }> = data.results ?? [];
 
@@ -170,25 +192,30 @@ async function verifySiret(
   for (const r of results) {
     const etab = (r.matching_etablissements ?? []).find((e) => e.siret === siret);
     if (!etab) continue;
-    if (etab.etat_administratif !== "A") return false; // fermé → refusé
+    if (etab.etat_administratif !== "A") return null; // fermé → refusé
     const cpMatch = codePostal ? etab.code_postal === codePostal : false;
-    return villeMatch(etab.libelle_commune, villeNorm) || cpMatch;
+    const villeOk = villeMatch(etab.libelle_commune, villeNorm) || cpMatch;
+    if (!villeOk) return null; // mauvaise ville → refusé
+    // vérification du nom : nom_complet OU nom_commercial OU enseignes
+    const nomCible = [r.nom_complet, etab.nom_commercial, ...(etab.liste_enseignes ?? [])]
+      .filter(Boolean)
+      .join(" ");
+    if (!nomMatch(nomCible, nomCommercial)) return null; // entreprise sans rapport → refusé
+    return { siret, adresse: etab.adresse ?? "" };
   }
-  return false;
+  return null;
 }
 
 // ─── Étape 3 : OpenAI avec web search (si OPENAI_API_KEY disponible) ──────────
 // Cas difficiles : grands groupes éclatés en plusieurs entités juridiques
-// (ex: Airbus Helicopters / Airbus Atlantic — SIREN différents). Le contact peut
-// travailler dans un établissement d'un AUTRE SIREN que celui du fichier.
-// On laisse donc OpenAI proposer un SIRET sans contrainte de SIREN, PUIS on le
-// vérifie systématiquement via l'API gouvernementale (existe + actif + bonne ville).
+// (ex: Airbus Helicopters / Airbus Atlantic, Neo2 / Neo2 RA — SIREN différents).
+// OpenAI propose un SIRET sans contrainte de SIREN, PUIS verifySiret valide tout.
 async function searchOpenAI(
   nomCommercial: string,
   siren: string,
   ville: string,
   codePostal?: string
-): Promise<string | null> {
+): Promise<EtabResult | null> {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) return null;
 
@@ -217,10 +244,8 @@ async function searchOpenAI(
   const match = answer.match(/\b(\d{14})\b/);
   if (!match) return null;
 
-  const siret = match[1];
-  // Vérification gouvernementale obligatoire avant d'accepter (anti-hallucination).
-  const ok = await verifySiret(siret, ville, codePostal);
-  return ok ? siret : null;
+  // Vérification gouvernementale obligatoire (existe + actif + ville + nom).
+  return verifySiret(match[1], nomCommercial, ville, codePostal);
 }
 
 // ─── Handler principal ────────────────────────────────────────────────────────
@@ -231,6 +256,7 @@ export async function POST(req: NextRequest) {
   if (!siren) {
     return NextResponse.json<SiretResponse>({
       siret: siretSiege ?? "",
+      adresse: "",
       confirmer: true,
       source: "fallback",
     });
@@ -241,38 +267,42 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(serverCache.get(cacheKey)!);
   }
 
+  const finish = (etab: EtabResult, source: SiretResponse["source"]) => {
+    const result: SiretResponse = {
+      siret: etab.siret,
+      adresse: etab.adresse,
+      confirmer: false,
+      source,
+    };
+    serverCache.set(cacheKey, result);
+    return NextResponse.json(result);
+  };
+
   // Étape 1 — recherche-entreprises.api.gouv.fr (gratuit)
   try {
-    const siret = await searchApiGov(nomCommercial, siren, ville, codePostal, departement);
-    if (siret) {
-      const result: SiretResponse = { siret, confirmer: false, source: "api-gov" };
-      serverCache.set(cacheKey, result);
-      return NextResponse.json(result);
-    }
+    const etab = await searchApiGov(nomCommercial, siren, ville, codePostal, departement);
+    if (etab) return finish(etab, "api-gov");
   } catch { /* timeout ou erreur réseau */ }
 
   // Étape 2 — Pappers (si PAPPERS_API_KEY configurée)
   try {
-    const siret = await searchPappers(siren, ville, codePostal);
-    if (siret) {
-      const result: SiretResponse = { siret, confirmer: false, source: "pappers" };
-      serverCache.set(cacheKey, result);
-      return NextResponse.json(result);
-    }
+    const etab = await searchPappers(siren, ville, codePostal);
+    if (etab) return finish(etab, "pappers");
   } catch { /* timeout ou erreur réseau */ }
 
   // Étape 3 — OpenAI web search (si OPENAI_API_KEY configurée)
   try {
-    const siret = await searchOpenAI(nomCommercial, siren, ville, codePostal);
-    if (siret) {
-      const result: SiretResponse = { siret, confirmer: false, source: "openai" };
-      serverCache.set(cacheKey, result);
-      return NextResponse.json(result);
-    }
+    const etab = await searchOpenAI(nomCommercial, siren, ville, codePostal);
+    if (etab) return finish(etab, "openai");
   } catch { /* timeout ou erreur réseau */ }
 
   // Fallback — SIRET du siège à confirmer
-  const fallback: SiretResponse = { siret: siretSiege ?? "", confirmer: true, source: "fallback" };
+  const fallback: SiretResponse = {
+    siret: siretSiege ?? "",
+    adresse: "",
+    confirmer: true,
+    source: "fallback",
+  };
   serverCache.set(cacheKey, fallback);
   return NextResponse.json(fallback);
 }
