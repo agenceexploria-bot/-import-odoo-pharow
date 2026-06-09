@@ -1,0 +1,12 @@
+# Agent pré-comptable — dépendances Python
+
+# API Anthropic (Claude)
+anthropic>=0.40.0
+
+# API Gmail (Google)
+google-api-python-client>=2.150.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.0
+
+# Chargement du fichier .env
+python-dotenv>=1.0.0
