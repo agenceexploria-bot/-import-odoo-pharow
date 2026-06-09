@@ -15,8 +15,10 @@ export async function resolveSiret(
   row: PharowRow,
   onProgress?: (msg: string) => void
 ): Promise<SiretResult> {
-  const siren = (row["SIREN"] ?? "").trim();
-  const siretSiege = (row["SIRET du siège"] ?? "").trim();
+  const sirenRaw = (row["SIREN"] ?? "").trim();
+  const siren = sirenRaw ? sirenRaw.padStart(9, "0") : "";
+  const siretSiegeRaw = (row["SIRET du siège"] ?? "").trim();
+  const siretSiege = siretSiegeRaw ? siretSiegeRaw.padStart(14, "0") : "";
   const nomCommercial = (row["Nom commercial"] ?? "").trim();
   const villeInfo = parseVille(row["Ville de résidence"] ?? "");
 
