@@ -1,8 +1,10 @@
-# Import Odoo — Pharow → Contacts Odoo (Actiwork)
+# Acticonvert — Pharow → Contacts Odoo (Actiwork)
 
 Transforme un export CSV Pharow/Kaspr en fichier CSV prêt à importer dans Odoo (module Contacts).
 
-**Parcours** : charger CSV → choisir étiquette → cliquer → télécharger
+**Parcours** : charger CSV → choisir étiquette → convertir → télécharger
+
+Déployé sur : [convert-pharow-odoo.netlify.app](https://convert-pharow-odoo.netlify.app)
 
 ---
 
@@ -21,26 +23,17 @@ Ouvrir [http://localhost:3000](http://localhost:3000)
 
 ---
 
-## Déployer sur Vercel (recommandé)
+## Déployer sur Netlify
 
-1. **Créer un dépôt GitHub** — pousser ce dossier :
-   ```bash
-   git init
-   git add .
-   git commit -m "Initial commit"
-   # créer un repo sur github.com puis :
-   git remote add origin https://github.com/VOTRE_ORG/import-odoo-pharow.git
-   git push -u origin main
-   ```
+1. **Pousser sur GitHub** — le repo est déjà connecté à Netlify via `agenceexploria-bot`.
 
-2. **Connecter Vercel** — aller sur [vercel.com](https://vercel.com) → "New Project" → importer le dépôt GitHub → Deploy.
+2. **Chaque `git push` sur `main` redéploie automatiquement.**
 
-3. **Configurer la variable d'environnement** (optionnel — active la recherche SIRET par IA en secours) :
-   - Dans Vercel → Settings → Environment Variables
-   - Ajouter : `ANTHROPIC_API_KEY` = votre clé Anthropic
-   - Sans cette clé, la recherche SIRET utilise uniquement l'API gouvernementale + fallback siège.
-
-4. **Chaque `git push` redéploie automatiquement.**
+3. **Configurer les variables d'environnement** (optionnel — activent les étapes de secours SIRET) :
+   - Dans Netlify → Site configuration → Environment variables
+   - `PAPPERS_API_KEY` : active la recherche via Pappers (tous établissements du SIREN)
+   - `OPENAI_API_KEY` : active la recherche via OpenAI web search (grands groupes multi-entités)
+   - Sans ces clés, la recherche SIRET utilise uniquement l'API gouvernementale + fallback siège.
 
 ---
 
@@ -50,17 +43,22 @@ Ouvrir [http://localhost:3000](http://localhost:3000)
 app/
   page.tsx                    ← UI principale (4 étapes)
   api/siret/route.ts          ← API route SIRET (côté serveur)
+  api/actia/route.ts          ← API route assistant ActIA
 lib/
-  csvParser.ts                ← Parsing CSV Pharow (2 formats)
+  csvParser.ts                ← Parsing CSV Pharow (2 formats Excel/standard)
   transform.ts                ← Transformations colonnes → CSV Odoo
   posteMatcher.ts             ← Matching poste Odoo (mots-clés + fuzzy)
-  siretClient.ts              ← Client front → /api/siret
+  siretClient.ts              ← Client front → /api/siret (avec cache session)
   villeParser.ts              ← Extraction ville / code postal / département
 ```
 
 ## Cascade recherche SIRET
 
 1. Cache session (SIREN + ville)
-2. API gouvernementale `recherche-entreprises.api.gouv.fr`
-3. Claude API + web_search *(si `ANTHROPIC_API_KEY` configurée)*
-4. Fallback : SIRET du siège + "SIRET A CONFIRMER" dans la colonne comment
+2. API gouvernementale `recherche-entreprises.api.gouv.fr` — recherche par SIREN strict
+3. API gouvernementale — recherche par nom commercial + ville (groupes éclatés en filiales)
+4. Pappers *(si `PAPPERS_API_KEY` configurée)* — tous établissements du SIREN
+5. OpenAI web search *(si `OPENAI_API_KEY` configurée)* — grands groupes multi-entités + vérification gouvernementale
+6. Fallback : SIRET du siège + "SIRET A CONFIRMER" dans la colonne comment
+
+> **Note** : les SIREN/SIRET tronqués par Excel (zéro initial supprimé) sont automatiquement corrigés avant toute recherche.
