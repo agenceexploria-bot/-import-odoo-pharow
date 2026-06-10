@@ -27,7 +27,7 @@ Mapping Pharow/Kaspr → Odoo :
 
 Options de conversion :
 - Prospecteur : "AW - A prospecter par BD (Audrey)" | "AW - A prospecter par Guillaume" | "Aucune étiquette"
-- Résolution SIRET : activable/désactivable. Quand activée, l'app interroge l'API gouvernementale (recherche-entreprises.api.gouv.fr), puis Pappers si disponible, puis Claude si nécessaire.
+- Résolution SIRET : activable/désactivable. Quand activée, l'app interroge l'API gouvernementale (recherche-entreprises.api.gouv.fr), puis par nom commercial + ville, puis Pappers si disponible, puis OpenAI web search si nécessaire.
 - Format de sortie : CSV uniquement, séparateur virgule, UTF-8, compatible import Odoo.
 
 "SIRET À CONFIRMER" = l'API n'a pas trouvé l'établissement local de l'entreprise. Le SIRET du siège est utilisé comme valeur par défaut. L'utilisateur doit vérifier manuellement dans Odoo.
